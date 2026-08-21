@@ -28,7 +28,26 @@ jobs:
             exit 1
           fi
           echo "Extracting $ZIPFILE"
-          unzip -o "$ZIPFILE" -d .
+          mkdir -p _extracted_tmp
+          unzip -o "$ZIPFILE" -d _extracted_tmp
+
+          # If settings.gradle is not at the top level, find it and flatten
+          if [ -f "_extracted_tmp/settings.gradle" ]; then
+            SRC_DIR="_extracted_tmp"
+          else
+            SRC_DIR=$(find _extracted_tmp -maxdepth 3 -name "settings.gradle" -exec dirname {} \; | head -n 1)
+          fi
+
+          if [ -z "$SRC_DIR" ]; then
+            echo "ERROR: settings.gradle not found anywhere inside the zip"
+            find _extracted_tmp -maxdepth 3 -type d
+            exit 1
+          fi
+
+          echo "Project root found at: $SRC_DIR"
+          shopt -s dotglob
+          cp -r "$SRC_DIR"/* .
+          rm -rf _extracted_tmp
 
       - name: Setup Java 17 (for Android SDK manager)
         uses: actions/setup-java@v5
