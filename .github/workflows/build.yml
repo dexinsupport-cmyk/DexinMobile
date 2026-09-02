@@ -9,67 +9,39 @@ jobs:
   build:
     name: Build Dexin Mobile
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Reassemble split source ZIP
+      - name: Find and extract source ZIP
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-
-          mapfile -t PARTS < <(
-            find . -maxdepth 2 -type f -name '*.zip' -print |
-            awk '
-              match($0,/Part[0-9]+(-[^\/]*)?\.zip$/) {
-                s=substr($0,RSTART,RLENGTH)
-                n=s; sub(/^Part/,"",n); sub(/-.*/,"",n); sub(/\.zip$/,"",n)
-                print n "\t" $0
-              }
-            ' | sort -n -k1,1 | cut -f2-
-          )
-
-          if [ "${#PARTS[@]}" -eq 0 ]; then
-            echo "ERROR: No Part*.zip files were found."
-            echo "Expected names such as sampstable_DexinMobile_fixedPart1.zip, Part2.zip, ..."
-            exit 1
-          fi
-
-          expected=1
-          for part in "${PARTS[@]}"; do
-            base="$(basename "$part")"
-            num="$(printf '%s' "$base" | sed -E 's/.*Part([0-9]+)(-[^/]*)?\.zip$/\1/')"
-            if [ "$num" != "$expected" ]; then
-              echo "ERROR: Expected Part${expected}, found Part${num}: $base"
-              exit 1
-            fi
-            expected=$((expected + 1))
-          done
-
-          echo "Found ${#PARTS[@]} parts:"
-          printf '  %s\n' "${PARTS[@]}"
-          rm -f source.zip
-          cat "${PARTS[@]}" > source.zip
-          unzip -t source.zip
           rm -rf _source
-          mkdir _source
-          unzip -q source.zip -d _source
+          mkdir -p _source
+          SOURCE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
+          if [ -z "$SOURCE" ]; then
+            echo 'ERROR: Source ZIP not found in repository root.'
+            exit 1
+          fi
+          echo "Source: $SOURCE"
+          unzip -t "$SOURCE"
+          unzip -q "$SOURCE" -d _source
 
-      - name: Locate Android Gradle project
+      - name: Locate Android project
         shell: bash
         run: |
           set -euo pipefail
-          GRADLEW="$(find _source -type f -name gradlew -print -quit)"
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found after extracting source.zip"
-            find _source -maxdepth 4 -type f | head -100
-            exit 1
+          GRADLEW="$(find _source -type f -name gradlew -print -quit || true)"
+          if [ -n "$GRADLEW" ]; then
+            PROJECT_DIR="$(dirname "$GRADLEW")"
+          else
+            SETTINGS="$(find _source -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit || true)"
+            [ -n "$SETTINGS" ] || { echo 'ERROR: settings.gradle/settings.gradle.kts not found'; exit 1; }
+            PROJECT_DIR="$(dirname "$SETTINGS")"
           fi
-          PROJECT_DIR="$(dirname "$GRADLEW")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Gradle project: $PROJECT_DIR"
+          echo "Project: $PROJECT_DIR"
 
       - name: Set up Java 8
         uses: actions/setup-java@v4
@@ -80,54 +52,31 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-30" "build-tools;30.0.1"
+          sdkmanager 'platform-tools' 'platforms;android-30' 'build-tools;30.0.1'
 
-      - name: Fix native C++ validation for CI ABI
-        shell: bash
-        run: |
-          set -euo pipefail
-          CPP="$PROJECT_DIR/app/src/main/cpp"
-          test -d "$CPP"
-
-          # The source contains 32-bit/64-bit layout assertions. The current
-          # Android CI toolchain builds the selected native ABI with different
-          # packing/alignment, so these compile-time checks stop the build before
-          # Gradle can produce the APK. Disable only the validation macros; do
-          # not alter the structures or native logic themselves.
-          find "$CPP" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cpp' -o -name '*.c' \) -print0 |
-            xargs -0 -r sed -Ei \
-              's/^[[:space:]]*#define[[:space:]]+VALIDATE_SIZE\(struc,[[:space:]]*size\)[[:space:]]+static_assert\(sizeof\(struc\)[^\n]*$/#define VALIDATE_SIZE(struc, size)/' \
-              -e 's/^[[:space:]]*#define[[:space:]]+VALIDATE_OFFSET\(struc,[[:space:]]*member,[[:space:]]*offset\)[[:space:]]+static_assert[^\n]*$/#define VALIDATE_OFFSET(struc, member, offset)/'
-
-          echo "Remaining validation macro definitions:"
-          grep -RInE '#define[[:space:]]+VALIDATE_(SIZE|OFFSET)' "$CPP" | head -30 || true
-
-      - name: Prepare Gradle wrapper
+      - name: Prepare Gradle
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+          if [ ! -f gradlew ]; then
+            echo 'ERROR: gradlew is missing from the source.'
+            exit 1
+          fi
           sed -i 's/\r$//' gradlew
           chmod +x gradlew
-          test -f settings.gradle || test -f settings.gradle.kts
-          test -f build.gradle || test -f build.gradle.kts
-          test -d app
 
-      - name: Build Debug APK
+      - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -o pipefail
           ./gradlew --no-daemon --stacktrace assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
-
-      - name: List APK output
-        if: always()
-        run: find "$PROJECT_DIR/app/build/outputs/apk" -type f -name '*.apk' -print 2>/dev/null || true
 
       - name: Upload build log
         if: failure()
@@ -136,7 +85,6 @@ jobs:
           name: DexinMobile-build-log
           path: gradle-build.log
           if-no-files-found: ignore
-          retention-days: 7
 
       - name: Upload APK
         if: success()
